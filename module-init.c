@@ -1,10 +1,7 @@
-#include <linux/version.h>
-#include <linux/module.h>
 #include <linux/kernel.h>
-#include <linux/slab.h>
+#include <linux/module.h>
+#include <linux/version.h>
 #include <linux/uaccess.h>
-#include <linux/security.h>
-#include <linux/mm.h>
 #include <linux/moduleloader.h>
 #include <linux/kallsyms.h>
 
