@@ -75,6 +75,38 @@ static int fixup_div0_error(struct exception_table_entry * entry)
 	return -EINVAL;
 }
 
+static void raise_undefined_opcode(void)
+{
+	debug("    %s enter\n", __func__);
+
+	asm volatile ( "ud2" );
+
+	debug("    %s leave\n", __func__);
+}
+
+static int fixup_undefined_opcode(struct exception_table_entry * entry)
+{
+	ud_t ud;
+
+	ud_initialize(&ud, BITS_PER_LONG, \
+		      UD_VENDOR_ANY, (void *)raise_undefined_opcode, 128);
+
+	while (ud_disassemble(&ud) && ud.mnemonic != UD_Iret) {
+		if (ud.mnemonic == UD_Iud2)
+		{
+			unsigned long address = \
+				(unsigned long)raise_undefined_opcode + ud_insn_off(&ud);
+
+			extable_make_insn(entry, address);
+			extable_make_fixup(entry, address + ud_insn_len(&ud));
+
+			return 0;
+		}
+	}
+
+	return -EINVAL;
+}
+
 static void raise_page_fault(void)
 {
 	debug("    %s enter\n", __func__);
@@ -116,8 +148,13 @@ struct {
 } exceptions[] = {
 	{
 		.name = "0x00 - div0 error (#DE)",
-		.raise = raise_div0_error,
 		.fixup = fixup_div0_error,
+		.raise = raise_div0_error,
+	},
+	{
+		.name = "0x06 - undefined opcode (#UD)",
+		.fixup = fixup_undefined_opcode,
+		.raise = raise_undefined_opcode,
 	},
 	{
 		.name = "0x14 - page fault (#PF)",
