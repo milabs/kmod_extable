@@ -16,6 +16,15 @@ module_free_t * pfnModuleFree = NULL;
 typedef typeof(module_alloc) module_alloc_t;
 module_alloc_t * pfnModuleAlloc = NULL;
 
+static void raise_div0_exception(void)
+{
+	debug("  %s enter\n", __func__);
+
+	{ volatile int x = 1 / 0; (x); }
+
+	debug("  %s leave\n", __func__);
+}
+
 static void raise_null_pointer_dereference(void)
 {
 	debug("  %s enter\n", __func__);
@@ -43,9 +52,36 @@ static void extable_make_fixup(struct exception_table_entry * entry, unsigned lo
 #endif
 }
 
-static void fixup_null_pointer_dereference(void)
+static void build_extable(void)
 {
 	ud_t ud;
+
+	int num_exentries = 0;
+	struct exception_table_entry * entry;
+
+	entry = (struct exception_table_entry *)pfnModuleAlloc(sizeof(*entry) * 2);
+
+	/* raise_div0_exception */
+
+	ud_initialize(&ud, BITS_PER_LONG, UD_VENDOR_ANY, \
+		      (void *)raise_div0_exception, 128);
+
+	while (ud_disassemble(&ud) && ud.mnemonic != UD_Iret) {
+		if (ud.mnemonic == UD_Idiv || ud.mnemonic == UD_Iidiv)
+		{
+			struct exception_table_entry * this = &entry[num_exentries++];
+
+			unsigned long address = \
+				(unsigned long)raise_div0_exception + ud_insn_off(&ud);
+
+			extable_make_insn(this, address);
+			extable_make_fixup(this, address + ud_insn_len(&ud));
+
+			break;
+		}
+	}
+
+	/* raise_null_pointer_dereference */
 
 	ud_initialize(&ud, BITS_PER_LONG, UD_VENDOR_ANY, \
 		      (void *)raise_null_pointer_dereference, 128);
@@ -54,23 +90,20 @@ static void fixup_null_pointer_dereference(void)
 		if (ud.mnemonic == UD_Imov && \
 		    ud.operand[0].type == UD_OP_MEM && ud.operand[1].type == UD_OP_IMM)
 		{
-			struct exception_table_entry * entry;
+			struct exception_table_entry * this = &entry[num_exentries++];
 
-			entry = (struct exception_table_entry *)pfnModuleAlloc(sizeof(*entry) * 1);
-			if (entry) {
-				unsigned long address = \
-					(unsigned long)raise_null_pointer_dereference + ud_insn_off(&ud);
+			unsigned long address = \
+				(unsigned long)raise_null_pointer_dereference + ud_insn_off(&ud);
 
-				extable_make_insn(entry, address);
-				extable_make_fixup(entry, address + ud_insn_len(&ud));
+			extable_make_insn(this, address);
+			extable_make_fixup(this, address + ud_insn_len(&ud));
 
-				THIS_MODULE->extable = entry;
-				THIS_MODULE->num_exentries = 1;
-
-				break;
-			}
+			break;
 		}
 	}
+
+	THIS_MODULE->extable = entry;
+	THIS_MODULE->num_exentries = num_exentries;
 }
 
 static void flush_extable(void)
@@ -84,12 +117,14 @@ static int test_extable(void)
 {
 	debug("test for extable\n");
 
-	fixup_null_pointer_dereference();
+	build_extable();
+
+	raise_div0_exception();
 	raise_null_pointer_dereference();
 
-	debug("test passed\n");
-
 	flush_extable();
+
+	debug("test passed\n");
 
 	return 0;
 }
