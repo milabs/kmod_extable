@@ -4,6 +4,7 @@
 #include <linux/uaccess.h>
 #include <linux/moduleloader.h>
 #include <linux/kallsyms.h>
+#include <linux/sort.h>
 
 #include "udis86.h"
 
@@ -16,23 +17,9 @@ module_free_t * pfnModuleFree = NULL;
 typedef typeof(module_alloc) module_alloc_t;
 module_alloc_t * pfnModuleAlloc = NULL;
 
-static void raise_div0_exception(void)
-{
-	debug("  %s enter\n", __func__);
-
-	{ volatile int x = 1 / 0; (x); }
-
-	debug("  %s leave\n", __func__);
-}
-
-static void raise_null_pointer_dereference(void)
-{
-	debug("  %s enter\n", __func__);
-
-	((int *)0)[0] = 0xdeadbeef;
-
-	debug("  %s leave\n", __func__);
-}
+/*
+ * extable helpers
+ */
 
 static void extable_make_insn(struct exception_table_entry * entry, unsigned long addr)
 {
@@ -52,58 +39,141 @@ static void extable_make_fixup(struct exception_table_entry * entry, unsigned lo
 #endif
 }
 
-static void build_extable(void)
+/*
+ * sample exceptions
+ */
+
+static void raise_div0_error(void)
+{
+	debug("    %s enter\n", __func__);
+
+	{ volatile int x = 1 / 0; (x); }
+
+	debug("    %s leave\n", __func__);
+}
+
+static int fixup_div0_error(struct exception_table_entry * entry)
 {
 	ud_t ud;
 
-	int num_exentries = 0;
-	struct exception_table_entry * entry;
-
-	entry = (struct exception_table_entry *)pfnModuleAlloc(sizeof(*entry) * 2);
-
-	/* raise_div0_exception */
-
-	ud_initialize(&ud, BITS_PER_LONG, UD_VENDOR_ANY, \
-		      (void *)raise_div0_exception, 128);
+	ud_initialize(&ud, BITS_PER_LONG, \
+		      UD_VENDOR_ANY, (void *)raise_div0_error, 128);
 
 	while (ud_disassemble(&ud) && ud.mnemonic != UD_Iret) {
 		if (ud.mnemonic == UD_Idiv || ud.mnemonic == UD_Iidiv)
 		{
-			struct exception_table_entry * this = &entry[num_exentries++];
-
 			unsigned long address = \
-				(unsigned long)raise_div0_exception + ud_insn_off(&ud);
+				(unsigned long)raise_div0_error + ud_insn_off(&ud);
 
-			extable_make_insn(this, address);
-			extable_make_fixup(this, address + ud_insn_len(&ud));
+			extable_make_insn(entry, address);
+			extable_make_fixup(entry, address + ud_insn_len(&ud));
 
-			break;
+			return 0;
 		}
 	}
 
-	/* raise_null_pointer_dereference */
+	return -EINVAL;
+}
 
-	ud_initialize(&ud, BITS_PER_LONG, UD_VENDOR_ANY, \
-		      (void *)raise_null_pointer_dereference, 128);
+static void raise_page_fault(void)
+{
+	debug("    %s enter\n", __func__);
+
+	((int *)0)[0] = 0xdeadbeef;
+
+	debug("    %s leave\n", __func__);
+}
+
+static int fixup_page_fault(struct exception_table_entry * entry)
+{
+	ud_t ud;
+
+	ud_initialize(&ud, BITS_PER_LONG, \
+		      UD_VENDOR_ANY, (void *)raise_page_fault, 128);
 
 	while (ud_disassemble(&ud) && ud.mnemonic != UD_Iret) {
 		if (ud.mnemonic == UD_Imov && \
 		    ud.operand[0].type == UD_OP_MEM && ud.operand[1].type == UD_OP_IMM)
 		{
-			struct exception_table_entry * this = &entry[num_exentries++];
-
 			unsigned long address = \
-				(unsigned long)raise_null_pointer_dereference + ud_insn_off(&ud);
+				(unsigned long)raise_page_fault + ud_insn_off(&ud);
 
-			extable_make_insn(this, address);
-			extable_make_fixup(this, address + ud_insn_len(&ud));
+			extable_make_insn(entry, address);
+			extable_make_fixup(entry, address + ud_insn_len(&ud));
 
-			break;
+			return 0;
 		}
 	}
 
-	THIS_MODULE->extable = entry;
+	return -EINVAL;
+}
+
+struct {
+	const char * name;
+	int (* fixup)(struct exception_table_entry *);
+	void (* raise)(void);
+
+} exceptions[] = {
+	{
+		.name = "0x00 - div0 error (#DE)",
+		.raise = raise_div0_error,
+		.fixup = fixup_div0_error,
+	},
+	{
+		.name = "0x14 - page fault (#PF)",
+		.fixup = fixup_page_fault,
+		.raise = raise_page_fault,
+	},
+};
+
+/* See lib/extable.c for details */
+static int cmp_ex(const void * a, const void * b)
+{
+	const struct exception_table_entry * x = a, * y = b;
+
+	/* avoid overflow */
+	if (x->insn > y->insn)
+		return 1;
+	if (x->insn < y->insn)
+		return -1;
+	return 0;
+}
+
+static int build_extable(void)
+{
+	int i, num_exentries = 0;
+	struct exception_table_entry * extable;
+
+	extable = (void *)pfnModuleAlloc(sizeof(*extable) * ARRAY_SIZE(exceptions));
+
+	if (extable == NULL) {
+		debug("Memory allocation failed\n");
+		return -ENOMEM;
+	}
+
+	debug("Building extable for:\n");
+
+	for (i = 0; i < ARRAY_SIZE(exceptions); i++) {
+
+		if (exceptions[i].fixup(&extable[num_exentries])) {
+			exceptions[i].raise = NULL;
+		} else {
+			num_exentries++;
+		}
+
+		debug("  %s%s\n", exceptions[i].name, \
+		      exceptions[i].raise ? "" : " (failed)");
+	}
+
+	debug("Building extable succeeded for %d/%lu items\n", \
+	      num_exentries, ARRAY_SIZE(exceptions));
+
+	sort(extable, num_exentries, sizeof(*extable), cmp_ex, NULL);
+
+	THIS_MODULE->extable = extable;
 	THIS_MODULE->num_exentries = num_exentries;
+
+	return 0;
 }
 
 static void flush_extable(void)
@@ -113,20 +183,22 @@ static void flush_extable(void)
 	THIS_MODULE->extable = NULL;
 }
 
-static int test_extable(void)
+void try_to_crash_the_system(void)
 {
-	debug("test for extable\n");
+	int i;
 
-	build_extable();
+	debug("Trying to crash the system with:\n");
 
-	raise_div0_exception();
-	raise_null_pointer_dereference();
+	for (i = 0; i < ARRAY_SIZE(exceptions); i++) {
+		if (!exceptions[i].raise)
+			continue;
 
-	flush_extable();
+		debug("  %s\n", exceptions[i].name);
 
-	debug("test passed\n");
+		exceptions[i].raise();
+	}
 
-	return 0;
+	debug("Congratulations, your system still alive\n");
 }
 
 int kallsyms_callback(void * data, const char * name, struct module * module, unsigned long address)
@@ -151,13 +223,12 @@ int init_module(void)
 		return -EINVAL;
 	}
 
-	debug("found module_free @ %pK\n", pfnModuleFree);
-	debug("found module_alloc @ %pK\n", pfnModuleAlloc);
+	if (build_extable())
+		return -ENOMEM;
 
-	if (test_extable())
-		return -EINVAL;
+	try_to_crash_the_system();
 
-	debug("completed\n");
+	flush_extable();
 
 	return -EAGAIN;
 }
