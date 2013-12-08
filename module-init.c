@@ -275,5 +275,6 @@ void cleanup_module(void)
 	flush_extable();
 }
 
-MODULE_LICENSE	("GPL");
-MODULE_AUTHOR	("Ilya V. Matveychikov <matvejchikov@gmail.com>");
+MODULE_LICENSE("GPL");
+MODULE_AUTHOR("Ilya V. Matveychikov <i.matveychikov@milabs.ru>");
+MODULE_DESCRIPTION("Linux kernel exception handling exmple")
