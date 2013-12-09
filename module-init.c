@@ -277,4 +277,4 @@ void cleanup_module(void)
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Ilya V. Matveychikov <i.matveychikov@milabs.ru>");
-MODULE_DESCRIPTION("Linux kernel exception handling exmple")
+MODULE_DESCRIPTION("Linux kernel exception handling exmple");
