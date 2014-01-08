@@ -17,6 +17,9 @@ module_free_t * pfnModuleFree = NULL;
 typedef typeof(module_alloc) module_alloc_t;
 module_alloc_t * pfnModuleAlloc = NULL;
 
+typedef typeof(sort_extable) sort_extable_t;
+sort_extable_t * pfnSortExtable = NULL;
+
 /*
  * extable helpers
  */
@@ -163,19 +166,6 @@ struct {
 	},
 };
 
-/* See lib/extable.c for details */
-static int cmp_ex(const void * a, const void * b)
-{
-	const struct exception_table_entry * x = a, * y = b;
-
-	/* avoid overflow */
-	if (x->insn > y->insn)
-		return 1;
-	if (x->insn < y->insn)
-		return -1;
-	return 0;
-}
-
 static int build_extable(void)
 {
 	int i, num_exentries = 0;
@@ -205,7 +195,7 @@ static int build_extable(void)
 	debug("Building extable succeeded for %d/%lu items\n", \
 	      num_exentries, ARRAY_SIZE(exceptions));
 
-	sort(extable, num_exentries, sizeof(*extable), cmp_ex, NULL);
+	pfnSortExtable(extable, extable + num_exentries);
 
 	THIS_MODULE->extable = extable;
 	THIS_MODULE->num_exentries = num_exentries;
@@ -247,6 +237,8 @@ int kallsyms_callback(void * data, const char * name, struct module * module, un
 		pfnModuleFree = (module_free_t *)address;
 	} else if (strcmp(name, "module_alloc") == 0) {
 		pfnModuleAlloc = (module_alloc_t *)address;
+	} else if (strcmp(name, "sort_extable") == 0) {
+		pfnSortExtable = (sort_extable_t *)address;
 	}
 
 	return 0;
@@ -256,7 +248,7 @@ int init_module(void)
 {
 	kallsyms_on_each_symbol(kallsyms_callback, NULL);
 
-	if (!pfnModuleFree || !pfnModuleAlloc) {
+	if (!pfnModuleFree || !pfnModuleAlloc || !pfnSortExtable) {
 		return -EINVAL;
 	}
 
