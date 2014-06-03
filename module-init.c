@@ -1,3 +1,4 @@
+#define DEBUG
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/version.h>
@@ -110,6 +111,39 @@ static int fixup_undefined_opcode(struct exception_table_entry * entry)
 	return -EINVAL;
 }
 
+static void raise_general_protection(void)
+{
+	debug("    %s enter\n", __func__);
+
+	((int *)0xffff800000000000)[0] = 0xdeadbeef;
+
+	debug("    %s leave\n", __func__);
+}
+
+static int fixup_general_protection(struct exception_table_entry * entry)
+{
+	ud_t ud;
+
+	ud_initialize(&ud, BITS_PER_LONG, \
+		      UD_VENDOR_ANY, (void *)raise_general_protection, 128);
+
+	while (ud_disassemble(&ud) && ud.mnemonic != UD_Iret) {
+		if (ud.mnemonic == UD_Imov && \
+		    ud.operand[1].type == UD_OP_REG && ud.operand[0].type == UD_OP_MEM)
+		{
+			unsigned long address = \
+				(unsigned long)raise_general_protection + ud_insn_off(&ud);
+
+			extable_make_insn(entry, address);
+			extable_make_fixup(entry, address + ud_insn_len(&ud));
+
+			return 0;
+		}
+	}
+
+	return -EINVAL;
+}
+
 static void raise_page_fault(void)
 {
 	debug("    %s enter\n", __func__);
@@ -158,6 +192,11 @@ struct {
 		.name = "0x06 - undefined opcode (#UD)",
 		.fixup = fixup_undefined_opcode,
 		.raise = raise_undefined_opcode,
+	},
+	{
+		.name = "0x0D - general protection (#GP)",
+		.fixup = fixup_general_protection,
+		.raise = raise_general_protection,
 	},
 	{
 		.name = "0x14 - page fault (#PF)",
